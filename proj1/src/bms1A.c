@@ -1,3 +1,10 @@
+/**
+ * \file bms1A.c
+ * \brief QPSK modulator
+ * \author Jan Wrona, <xwrona00@stud.fit.vutbr.cz>
+ * \date 2015
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,116 +20,39 @@
 #define AMPLITUDE 0x7F000000u
 
 #define FREQ 1000 //frequency [Hz]
-#define NORM_FREQ ((double)FREQ / SAMPLE_RATE) //normalized frequency, cycles per sample
+#define NORM_FREQ ((double)FREQ / SAMPLE_RATE) //normalized f, cycles per sample
 
-#define SYMBOL_LEN_MIN 1 //symbol = 1 sample (SAMPLE_RATE bits/s)
-#define SYMBOL_LEN_MAX (SAMPLE_RATE / FREQ * 2) //symbol = 2 periods (1000 bits/s)
-#define SYMBOL_LEN 30 //symbol = 10 samples
+#define SYMBOL_LEN_MIN 1 //symbol = 1 sample (SAMPLE_RATE bps)
+#define SYMBOL_LEN_MAX (SAMPLE_RATE / FREQ * 2) //symbol = 2 periods (1000 bps)
+#define SYMBOL_LEN 30 //symbol = SYMBOL_LEN samples
 /* symbol_rate = SAMPLE_RATE / SYMBOL_LEN */
 /* bit_rate = symbol_rate * 2 */
-
-#define INT_BUFFER_INIT_SIZE 1024
 
 #define SYNCH_SEQ "00110011"
 
 
-struct int_buffer { //inflating ingeter bufffer structure
-        int *data; //array of integers
-        size_t cnt; //number of integers in the array
-        size_t size; //actual array size
+static const double phase_shift[4] = {
+        1.0 / 4.0 * M_PI, //00 -> 45 degrees
+        7.0 / 4.0 * M_PI, //01 -> 315 degrees
+        3.0 / 4.0 * M_PI, //10 -> 135 degrees
+        5.0 / 4.0 * M_PI, //11 -> 225 degrees
 };
 
 
-static int int_buffer_resize(struct int_buffer *ib)
+static void mod_symbols(char sym1, char sym2, size_t *time, int *buffer)
 {
-        assert(ib != NULL);
-
-        const size_t new_size = (ib->size == 0) ?
-                INT_BUFFER_INIT_SIZE : ib->size * 2;
-        int *new_data = realloc(ib->data, new_size * sizeof (int));
-
-        if (new_data == NULL) {
-                perror("realloc");
-                return 1; //failure
-        }
-
-        ib->data = new_data;
-        ib->size = new_size;
-
-        return 0; //success
-}
-
-static struct int_buffer * int_buffer_init(void)
-{
-        struct int_buffer *ib = calloc(1, sizeof (struct int_buffer));
-
-        if (ib == NULL) {
-                perror("calloc");
-        }
-
-        return ib; //NULL or address
-}
-
-static void int_buffer_free(struct int_buffer *ib)
-{
-        assert(ib != NULL);
-
-        free(ib->data);
-        free(ib);
-}
-
-static int int_buffer_add(struct int_buffer *ib, int data)
-{
-        assert(ib != NULL);
-
-        if (ib->cnt == ib->size) { //array full, inflate it
-                if (int_buffer_resize(ib) != 0) {
-                        return 1; //failure
-                }
-        }
-
-        ib->data[ib->cnt++] = data;
-
-        return 0; //success
-}
-
-int mod_symbols(char sym1, char sym2, size_t *time, struct int_buffer *buffer)
-{
-        double phase_shift;
+        size_t phase_shift_idx = 2 * (sym1 - '0') + (sym2 - '0');
 
 
-        switch (2 * (sym1 - '0') + (sym2 - '0')) {
-        case 0:
-                phase_shift = 1.0 / 4.0 * M_PI; //00 -> 45 degrees
-                break;
-        case 1:
-                phase_shift = 7.0 / 4.0 * M_PI; //01 -> 315 degrees
-                break;
-        case 2:
-                phase_shift = 3.0 / 4.0 * M_PI; //10 -> 135 degrees
-                break;
-        case 3:
-                phase_shift = 5.0 / 4.0 * M_PI; //01 -> 225 degrees
-                break;
-        default:
-                assert(!"bad symbols");
-        }
+        assert(phase_shift_idx < 4);
 
         for (size_t i = 0; i < SYMBOL_LEN; ++i) {
-                const double res = AMPLITUDE * cos(2 * M_PI * NORM_FREQ *
-                                *time + phase_shift);
-
-                if (int_buffer_add(buffer, (int)res) != 0) {
-                        return 1; //failure
-                }
+                buffer[i] = AMPLITUDE * cos(2.0 * M_PI * NORM_FREQ * *time +
+                                phase_shift[phase_shift_idx]);
 
                 (*time)++;
         }
-
-
-        return 0; //success
 }
-
 
 int main(int argc, char **argv)
 {
@@ -137,9 +67,9 @@ int main(int argc, char **argv)
                 .channels = CHANNELS,
                 .format = FORMAT,
         };
-        sf_count_t sf_count; //successfully written sampled
+        sf_count_t items_written; //successfully written items
 
-        struct int_buffer *buffer = int_buffer_init(); //samples buffer
+        int buffer[SYMBOL_LEN]; //samples buffer
 
 
         if (argc != 2) {
@@ -155,59 +85,51 @@ int main(int argc, char **argv)
         }
 
 
-        /* Initializations, file opening. */
-        if (buffer == NULL) {
-                return EXIT_FAILURE;
-        }
-
+        /* Input and output file opening. */
         in_file = fopen(argv[1], "r");
         if (in_file == NULL) {
                 perror(argv[1]);
                 return EXIT_FAILURE;
         }
 
-
-        /* Modulate synchronization sequence. */
-        for (size_t i = 0; i < (sizeof (SYNCH_SEQ) - 1); i += 2) {
-                if (mod_symbols(SYNCH_SEQ[i], SYNCH_SEQ[i + 1], &time, buffer)
-                                != 0) {
-                        return EXIT_FAILURE;
-                }
-        }
-
-        /* Modulate input data file. */
-        for (int sym1 = fgetc(in_file), sym2 = fgetc(in_file);
-                        (sym1 == '0' || sym1 == '1') && (sym2 == '0' || sym2 == '1');
-                        sym1 = fgetc(in_file), sym2 = fgetc(in_file))
-        {
-                if (mod_symbols(sym1, sym2, &time, buffer) != 0) {
-                        return EXIT_FAILURE;
-                }
-        }
-
-        /* Open output sound file, write buffer and close file. */
         argv[1][file_name_len - 3] = 'w';
         argv[1][file_name_len - 2] = 'a';
-        argv[1][file_name_len - 1] = 'w';
-
+        argv[1][file_name_len - 1] = 'v';
         out_file = sf_open(argv[1], SFM_WRITE, &sf_info);
         if (out_file == NULL) {
                 fprintf(stderr, "%s\n", sf_strerror(out_file));
                 return EXIT_FAILURE;
         }
 
-        sf_count = sf_write_int(out_file, buffer->data, buffer->cnt);
-        assert((size_t)sf_count == buffer->cnt);
 
+        /* Modulate and write synchronization sequence. */
+        for (size_t i = 0; i < (sizeof (SYNCH_SEQ) - 1); i += 2) {
+                mod_symbols(SYNCH_SEQ[i], SYNCH_SEQ[i + 1], &time, buffer);
+
+                items_written = sf_write_int(out_file, buffer, SYMBOL_LEN);
+                assert(items_written == SYMBOL_LEN);
+        }
+
+        /* Modulate and write input data file. */
+        for (int sym1 = fgetc(in_file), sym2 = fgetc(in_file);
+                        (sym1 == '0' || sym1 == '1') &&
+                        (sym2 == '0' || sym2 == '1');
+                        sym1 = fgetc(in_file), sym2 = fgetc(in_file))
+        {
+                mod_symbols(sym1, sym2, &time, buffer);
+
+                items_written = sf_write_int(out_file, buffer, SYMBOL_LEN);
+                assert(items_written == SYMBOL_LEN);
+        }
+
+
+        /* Close input and output filess. */
         ret = sf_close(out_file);
         if (ret != 0) {
                 fprintf(stderr, "%s\n", sf_error_number(ret));
         }
-
-
-        /* Close input text file and free sample buffer. */
         fclose(in_file);
-        int_buffer_free(buffer);
+
 
         return EXIT_SUCCESS;
 }

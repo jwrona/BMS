@@ -1,4 +1,4 @@
-CC=gcc-5.2
+CC=gcc
 CFLAGS=--std=gnu99 -Wall -Wextra -pedantic
 LDFLAGS=-L . -lm -lsndfile
 
